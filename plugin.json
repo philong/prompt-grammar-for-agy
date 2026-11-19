@@ -1,0 +1,27 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "prompt-grammar",
+  "displayName": "Prompt Grammar",
+  "version": "1.0.0",
+  "description": "Proofreads each prompt you send, shows grammar fixes inline or in the CLI status line, tracks mistake history, and coaches with /grammar stats, review, and ask.",
+  "logo": "assets/logo.png",
+  "suggestedPrompts": [
+    "/grammar help",
+    "/grammar stats 30d",
+    "/grammar review"
+  ],
+  "author": {
+    "name": "Phi-Long",
+    "url": "https://github.com/philong"
+  },
+  "homepage": "https://github.com/philong/prompt-grammar-for-agy",
+  "repository": "https://github.com/philong/prompt-grammar-for-agy",
+  "license": "MIT",
+  "keywords": [
+    "grammar",
+    "proofreading",
+    "writing",
+    "language",
+    "coaching"
+  ]
+}

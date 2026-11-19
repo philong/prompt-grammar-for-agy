@@ -1,0 +1,25 @@
+{
+  "prompt-grammar": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "node ./dist/hook.mjs",
+        "timeout": 10
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "node ./dist/hook.mjs",
+        "timeout": 180
+      }
+    ],
+    "PostInvocation": [
+      {
+        "type": "command",
+        "command": "node ./dist/hook.mjs",
+        "timeout": 10
+      }
+    ]
+  }
+}
