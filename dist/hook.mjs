@@ -72,7 +72,7 @@ var settingsFrom = (o = {}, env = process.env) => ({
   clean: o.clean !== false,
   askMemory: o.ask_memory !== false,
   display: normalizeDisplay(o.display) ?? "reply",
-  timeoutMs: clamp(o.timeout_ms, 2000, 120000, 30000),
+  timeoutMs: clamp(o.timeout_ms, 2000, 120000, 120000),
   endpoint: typeof o.endpoint === "string" ? o.endpoint.trim() : "",
   endpointModel: typeof o.endpoint_model === "string" ? o.endpoint_model.trim() : "",
   endpointKey: typeof o.endpoint_key === "string" && o.endpoint_key.trim() !== "" ? o.endpoint_key.trim() : (env.PROMPT_GRAMMAR_ENDPOINT_KEY ?? "").trim()

@@ -122,7 +122,7 @@ export const settingsFrom = (o: Record<string, unknown> = {}, env: Record<string
   clean: o.clean !== false,
   askMemory: o.ask_memory !== false,
   display: normalizeDisplay(o.display) ?? 'reply',
-  timeoutMs: clamp(o.timeout_ms, 2000, 120000, 30000),
+  timeoutMs: clamp(o.timeout_ms, 2000, 120000, 120000),
   endpoint: typeof o.endpoint === 'string' ? o.endpoint.trim() : '',
   endpointModel: typeof o.endpoint_model === 'string' ? o.endpoint_model.trim() : '',
   endpointKey:

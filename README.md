@@ -88,7 +88,7 @@ Stored in `~/.gemini/config/grammar.json` (and optionally overridden per project
 | `clean` | `true` | Show clean streak (`✓ no mistakes · N in a row`) starting at 3 clean prompts. |
 | `ask_memory` | `true` | Remember last 5 asks/reviews per session for follow-ups. |
 | `display` | `reply` | `reply` (sync, appended to current reply), `auto` (`statusline` in Antigravity CLI when installed, `reply` in IDE/Desktop), `async` (0 ms background check, appended visibly on next reply), `system` (0 ms background check, injected as system row), `statusline` (0 ms async CLI status bar with ANSI colors, 0 model tokens), or `user_markdown` (panics in `agy` 1.5.12 with `type mismatch: cannot convert string to message`; kept for future `agy` versions). |
-| `timeout_ms` | `30000` | Timeout (ms) for live prompt checks. |
+| `timeout_ms` | `120000` | Timeout (ms) for live prompt checks. |
 | `endpoint` | `""` | OpenAI-compatible API URL (Ollama, llama.cpp, LM Studio, Google AI Studio, OpenRouter). |
 | `endpoint_model` | `""` | Model ID for `endpoint` (empty uses server default). |
 | `endpoint_key` | `""` | Bearer token for `endpoint` (or set `PROMPT_GRAMMAR_ENDPOINT_KEY` env var). |
