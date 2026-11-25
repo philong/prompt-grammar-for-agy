@@ -34,9 +34,14 @@ export type AgyHookInput = {
   cwd?: string
   invocationNum?: number
   initialNumSteps?: number
+  executionNum?: number
+  terminationReason?: string
+  error?: string
+  fullyIdle?: boolean
+  continuationActive?: boolean
 }
 
-/** Hook stdout payload returned to Antigravity for SessionStart / PreInvocation / PostInvocation. */
+/** Hook stdout payload returned to Antigravity for SessionStart / PreInvocation / PostInvocation / Stop. */
 export type AgyHookOutput = {
   injectSteps?: Array<
     | { systemMessage: { systemMessage: string; metadata?: Record<string, string> } }

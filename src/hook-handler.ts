@@ -10,7 +10,7 @@ import { injectSystemMessage, injectUserMarkdown, replyNote, verbatimCommandNote
 import { INTERNAL_ENV, isProviderReady } from './providers'
 import type { Completer } from './providers'
 import { checkableText, runPromptCheck } from './runner'
-import { drainPending, loadSession, markHistoryAnnounced, pruneStaleSessions, readMeta } from './state'
+import { clearInflight, drainPending, loadSession, markHistoryAnnounced, pruneStaleSessions, readInflight, readMeta, readStatusLine, saveInflight } from './state'
 import { resolveEffectiveDisplay } from './statusline'
 import type { AgyHookInput, AgyHookOutput } from './types'
 
@@ -18,16 +18,68 @@ export type HandleHookOptions = {
   env?: Record<string, string | undefined>
   now?: number
   completer?: Completer
-  spawnWorker?: (workerScript: string, jobJson: string) => void
+  spawnWorker?: (workerScript: string, jobJson: string) => number | undefined | void
+  pollIntervalMs?: number
+  isPidAlive?: (pid: number) => boolean
 }
 
-const defaultSpawnWorker = (workerScript: string, jobJson: string) => {
+const defaultSpawnWorker = (workerScript: string, jobJson: string): number | undefined => {
   const child = spawn(process.execPath, [workerScript], {
     detached: true,
     stdio: 'ignore',
     env: { ...process.env, [INTERNAL_ENV]: '1', PROMPT_GRAMMAR_JOB: jobJson },
   })
   child.unref()
+  return child.pid
+}
+
+const defaultIsPidAlive = (pid: number): boolean => {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false
+  }
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code !== 'ESRCH'
+  }
+}
+
+const waitForInflightStatusLine = async (
+  dataDir: string,
+  conversationId: string,
+  timeoutMs: number,
+  opts: { pollIntervalMs?: number; isPidAlive?: (pid: number) => boolean } = {},
+): Promise<void> => {
+  const initial = readInflight(dataDir, conversationId)
+  if (initial === undefined) {
+    return
+  }
+  const pollMs = Math.max(5, opts.pollIntervalMs ?? 50)
+  const isAlive = opts.isPidAlive ?? defaultIsPidAlive
+  const maxWaitMs = Math.min(timeoutMs + 2000, 120_000)
+  const deadline = Math.min(Date.now() + maxWaitMs, initial.startedAt + maxWaitMs)
+
+  while (true) {
+    const current = readInflight(dataDir, conversationId)
+    if (current === undefined || current.id !== initial.id) {
+      return
+    }
+    const sl = readStatusLine(dataDir, conversationId)
+    if (sl !== undefined && sl.id === initial.id) {
+      clearInflight(dataDir, conversationId, initial.id)
+      return
+    }
+    if (current.pid !== undefined && !isAlive(current.pid)) {
+      clearInflight(dataDir, conversationId, initial.id)
+      return
+    }
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) {
+      return
+    }
+    await new Promise<void>(resolve => setTimeout(resolve, Math.min(pollMs, remaining)))
+  }
 }
 
 export const handleHook = async (payload: AgyHookInput, opts: HandleHookOptions = {}): Promise<AgyHookOutput> => {
@@ -74,6 +126,17 @@ export const handleHook = async (payload: AgyHookInput, opts: HandleHookOptions 
     return text ? injectSystemMessage(`Grammar check for your previous prompt:\n${text}`) : {}
   }
 
+  if (event === 'Stop') {
+    if (display !== 'statusline' || payload.terminationReason === 'USER_CANCELED') {
+      return {}
+    }
+    await waitForInflightStatusLine(paths.dataDir, conversationId, settings.timeoutMs, {
+      pollIntervalMs: opts.pollIntervalMs,
+      isPidAlive: opts.isPidAlive,
+    })
+    return {}
+  }
+
   if (event !== 'PreInvocation') {
     return {}
   }
@@ -118,8 +181,19 @@ export const handleHook = async (payload: AgyHookInput, opts: HandleHookOptions 
     const hasWorker = existsSync(workerScript)
 
     if (canCheck && hasWorker) {
+      const jobId = String(now)
+      const startedAt = Date.now()
+      if (display === 'statusline') {
+        saveInflight(paths.dataDir, conversationId, { id: jobId, startedAt })
+      }
       const spawner = opts.spawnWorker ?? defaultSpawnWorker
-      spawner(workerScript, JSON.stringify({ rawInput, conversationId, cwd, now, display }))
+      const pid = spawner(workerScript, JSON.stringify({ id: jobId, rawInput, conversationId, cwd, now, display }))
+      if (display === 'statusline' && typeof pid === 'number' && Number.isInteger(pid) && pid > 0) {
+        const current = readInflight(paths.dataDir, conversationId)
+        if (current?.id === jobId) {
+          saveInflight(paths.dataDir, conversationId, { id: jobId, startedAt: current.startedAt, pid })
+        }
+      }
     }
 
     if (display === 'statusline') {

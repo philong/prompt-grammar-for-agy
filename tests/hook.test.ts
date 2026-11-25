@@ -1,16 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 import { runCommand } from '../src/commands'
 import { resolvePaths } from '../src/config'
 import { handleHook } from '../src/hook-handler'
 import { ENDPOINT_REQUIRED_MESSAGE, INTERNAL_ENV } from '../src/providers'
 import type { Completer } from '../src/providers'
-import { appendPending, loadSession, readHistoryFile } from '../src/state'
+import { appendPending, loadSession, readHistoryFile, readInflight, saveInflight, saveStatusLine } from '../src/state'
 import { buildStatusLineCommand, renderStatusLine } from '../src/statusline'
 
 let tmpDir = ''
@@ -557,6 +557,165 @@ describe('statusline display mode', () => {
     expect(ideForced).toEqual({})
     expect(spawned.length).toBe(2)
     expect(JSON.parse(spawned[1] ?? '{}').display).toBe('statusline')
+  })
+
+  test('Stop hook waits for in-flight statusline worker to finish before returning', async () => {
+    const paths = resolvePaths(undefined, env)
+    await runCommand({ args: 'config display statusline', conversationId: 'sl-stop', paths, now: NOW, env })
+    mkdirSync(join(env.PLUGIN_ROOT!, 'dist'), { recursive: true })
+    writeFileSync(join(env.PLUGIN_ROOT!, 'dist', 'check-worker.mjs'), '// stub')
+
+    let jobId = ''
+    const pre = await handleHook(
+      { hookEventName: 'PreInvocation', invocationNum: 0, conversationId: 'sl-stop', lastUserInput: 'it should appea here' },
+      {
+        env,
+        now: NOW,
+        spawnWorker: (_script, job) => {
+          jobId = (JSON.parse(job) as { id: string }).id
+          return process.pid
+        },
+      },
+    )
+    expect(pre).toEqual({})
+    expect(readInflight(paths.dataDir, 'sl-stop')?.id).toBe(jobId)
+
+    setTimeout(() => {
+      saveStatusLine(paths.dataDir, 'sl-stop', {
+        id: jobId,
+        ansi: '\x1b[36m✎\x1b[0m \x1b[32mappear\x1b[0m \x1b[2m(typo)\x1b[0m',
+        plain: '✎ appear (typo)',
+        updatedAt: NOW,
+      })
+    }, 40)
+
+    const stopOut = await handleHook(
+      { hookEventName: 'Stop', executionNum: 0, terminationReason: 'NO_TOOL_CALL', conversationId: 'sl-stop' },
+      { env, pollIntervalMs: 10 },
+    )
+    expect(stopOut).toEqual({})
+    expect(readInflight(paths.dataDir, 'sl-stop')).toBeUndefined()
+    expect(renderStatusLine({ conversation_id: 'sl-stop' }, { env })).toContain('\x1b[32mappear\x1b[0m')
+  })
+
+  test('Stop returns immediately when idle, USER_CANCELED, or worker PID is dead', async () => {
+    const paths = resolvePaths(undefined, env)
+    await runCommand({ args: 'config display statusline', conversationId: 'sl-stop-fast', paths, now: NOW, env })
+
+    // 1) No inflight marker -> returns immediately.
+    const t0 = Date.now()
+    expect(await handleHook({ hookEventName: 'Stop', terminationReason: 'NO_TOOL_CALL', conversationId: 'sl-stop-fast' }, { env })).toEqual({})
+    expect(Date.now() - t0).toBeLessThan(100)
+
+    // 2) USER_CANCELED -> returns immediately without clearing marker.
+    saveInflight(paths.dataDir, 'sl-stop-fast', { id: 'cancel-1', startedAt: Date.now(), pid: process.pid })
+    const t1 = Date.now()
+    expect(await handleHook({ hookEventName: 'Stop', terminationReason: 'USER_CANCELED', conversationId: 'sl-stop-fast' }, { env })).toEqual({})
+    expect(Date.now() - t1).toBeLessThan(100)
+    expect(readInflight(paths.dataDir, 'sl-stop-fast')?.id).toBe('cancel-1')
+
+    // 3) Dead worker PID -> cleans up stale marker and returns immediately.
+    saveInflight(paths.dataDir, 'sl-stop-fast', { id: 'dead-1', startedAt: Date.now(), pid: 999_999 })
+    const t2 = Date.now()
+    expect(
+      await handleHook(
+        { hookEventName: 'Stop', terminationReason: 'NO_TOOL_CALL', conversationId: 'sl-stop-fast' },
+        { env, pollIntervalMs: 10, isPidAlive: () => false },
+      ),
+    ).toEqual({})
+    expect(Date.now() - t2).toBeLessThan(100)
+    expect(readInflight(paths.dataDir, 'sl-stop-fast')).toBeUndefined()
+  })
+
+  test('saveStatusLine ignores stale out-of-order writes with older updatedAt', async () => {
+    const paths = resolvePaths(undefined, env)
+    await runCommand({ args: 'config display statusline', conversationId: 'sl-order', paths, now: NOW, env })
+    saveStatusLine(paths.dataDir, 'sl-order', {
+      id: '200',
+      ansi: 'newer',
+      plain: 'newer',
+      updatedAt: 2000,
+    })
+    saveStatusLine(paths.dataDir, 'sl-order', {
+      id: '100',
+      ansi: 'older',
+      plain: 'older',
+      updatedAt: 1000,
+    })
+    expect(renderStatusLine({ conversation_id: 'sl-order' }, { env: { ...env, NO_COLOR: '1' } })).toBe('newer')
+  })
+
+  test('end-to-end PreInvocation + real dist/check-worker.mjs + Stop updates statusline before idle', async () => {
+    const repoRoot = resolve(import.meta.dir, '..')
+    const builtWorker = join(repoRoot, 'dist', 'check-worker.mjs')
+    expect(existsSync(builtWorker)).toBe(true)
+
+    const paths = resolvePaths(undefined, env)
+    const server = createServer((_req, res) => {
+      setTimeout(() => {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    english: true,
+                    fixes: [{ from: 'appea', to: 'appear', why: 'typo', kind: 'spelling' }],
+                    natural: null,
+                  }),
+                },
+              },
+            ],
+          }),
+        )
+      }, 200)
+    })
+    await new Promise<void>(resolveListen => server.listen(0, '127.0.0.1', resolveListen))
+
+    const prevEnv = {
+      PROMPT_GRAMMAR_CONFIG_DIR: process.env.PROMPT_GRAMMAR_CONFIG_DIR,
+      PLUGIN_DATA: process.env.PLUGIN_DATA,
+      PLUGIN_ROOT: process.env.PLUGIN_ROOT,
+      AGY_CLI_SETTINGS: process.env.AGY_CLI_SETTINGS,
+    }
+    try {
+      const addr = server.address() as { port: number }
+      await runCommand({ args: `config endpoint http://127.0.0.1:${addr.port}`, conversationId: 'sl-e2e', paths, now: NOW, env })
+      await runCommand({ args: 'config endpoint_model local-test', conversationId: 'sl-e2e', paths, now: NOW, env })
+      await runCommand({ args: 'config display statusline', conversationId: 'sl-e2e', paths, now: NOW, env })
+
+      const e2eEnv: Record<string, string | undefined> = { ...env, PLUGIN_ROOT: repoRoot }
+      process.env.PROMPT_GRAMMAR_CONFIG_DIR = e2eEnv.PROMPT_GRAMMAR_CONFIG_DIR
+      process.env.PLUGIN_DATA = e2eEnv.PLUGIN_DATA
+      process.env.PLUGIN_ROOT = e2eEnv.PLUGIN_ROOT
+      process.env.AGY_CLI_SETTINGS = e2eEnv.AGY_CLI_SETTINGS
+
+      const tPre = Date.now()
+      const preOut = await handleHook(
+        { hookEventName: 'PreInvocation', invocationNum: 0, conversationId: 'sl-e2e', lastUserInput: 'it should appea here' },
+        { env: e2eEnv, now: Date.now() },
+      )
+      expect(preOut).toEqual({})
+      expect(Date.now() - tPre).toBeLessThan(150)
+
+      const stopOut = await handleHook(
+        { hookEventName: 'Stop', executionNum: 0, terminationReason: 'NO_TOOL_CALL', conversationId: 'sl-e2e' },
+        { env: e2eEnv, pollIntervalMs: 15 },
+      )
+      expect(stopOut).toEqual({})
+      expect(readInflight(paths.dataDir, 'sl-e2e')).toBeUndefined()
+      expect(renderStatusLine({ conversation_id: 'sl-e2e' }, { env: e2eEnv })).toContain('\x1b[32mappear\x1b[0m')
+    } finally {
+      for (const [k, v] of Object.entries(prevEnv)) {
+        if (v === undefined) {
+          delete process.env[k]
+        } else {
+          process.env[k] = v
+        }
+      }
+      await new Promise<void>(resolveClose => server.close(() => resolveClose()))
+    }
   })
 })
 

@@ -92,7 +92,7 @@ export const runPromptCheck = async ({
       id: String(check.id),
       ansi: ansiError(errLine),
       plain: errLine,
-      updatedAt: Date.now(),
+      updatedAt: now,
     })
     return { skipped: false, check, markdown: `*${errLine}*`, plain: errLine }
   }
@@ -165,7 +165,7 @@ export const runPromptCheck = async ({
         updatedAt: now,
       })
     } else {
-      clearStatusLine(paths.dataDir, conversationId)
+      clearStatusLine(paths.dataDir, conversationId, now)
     }
 
     if (settings.clean && session.streak >= STREAK_FROM) {

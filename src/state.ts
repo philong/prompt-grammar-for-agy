@@ -40,6 +40,7 @@ const safeId = (id: string) => id.replace(/[^a-zA-Z0-9._-]/g, '_') || 'default'
 export const sessionPath = (dataDir: string, conversationId: string) => join(dataDir, 'sessions', `${safeId(conversationId)}.json`)
 export const pendingPath = (dataDir: string, conversationId: string) => join(dataDir, 'pending', `${safeId(conversationId)}.json`)
 export const statusLinePath = (dataDir: string, conversationId: string) => join(dataDir, 'statusline', `${safeId(conversationId)}.json`)
+export const inflightPath = (dataDir: string, conversationId: string) => join(dataDir, 'inflight', `${safeId(conversationId)}.json`)
 export const metaPath = (dataDir: string) => join(dataDir, 'meta.json')
 
 export const loadSession = (dataDir: string, conversationId: string, now = Date.now()): SessionState => {
@@ -67,7 +68,7 @@ export const saveSession = (dataDir: string, conversationId: string, state: Sess
 }
 
 export const pruneStaleSessions = (dataDir: string, now = Date.now()) => {
-  for (const sub of ['sessions', 'pending', 'statusline']) {
+  for (const sub of ['sessions', 'pending', 'statusline', 'inflight']) {
     const dir = join(dataDir, sub)
     if (!existsSync(dir)) {
       continue
@@ -181,6 +182,10 @@ export type StatusLineEntry = {
 }
 
 export const saveStatusLine = (dataDir: string, conversationId: string, entry: StatusLineEntry) => {
+  const existing = readStatusLine(dataDir, conversationId)
+  if (existing !== undefined && existing.updatedAt > entry.updatedAt) {
+    return
+  }
   atomicWrite(statusLinePath(dataDir, conversationId), JSON.stringify(entry))
 }
 
@@ -210,8 +215,72 @@ export const readStatusLine = (dataDir: string, conversationId: string): StatusL
   }
 }
 
-export const clearStatusLine = (dataDir: string, conversationId: string) => {
+export const clearStatusLine = (dataDir: string, conversationId: string, minUpdatedAt?: number) => {
+  if (minUpdatedAt !== undefined) {
+    const existing = readStatusLine(dataDir, conversationId)
+    if (existing !== undefined && existing.updatedAt > minUpdatedAt) {
+      return
+    }
+  }
   const path = statusLinePath(dataDir, conversationId)
+  if (!existsSync(path)) {
+    return
+  }
+  try {
+    unlinkSync(path)
+  } catch {
+    // Ignore cleanup failure.
+  }
+}
+
+// --- Per-conversation in-flight statusline worker markers ---
+
+export type InflightEntry = {
+  id: string
+  startedAt: number
+  pid?: number
+}
+
+export const saveInflight = (dataDir: string, conversationId: string, entry: InflightEntry) => {
+  atomicWrite(inflightPath(dataDir, conversationId), JSON.stringify(entry))
+}
+
+export const readInflight = (dataDir: string, conversationId: string): InflightEntry | undefined => {
+  const path = inflightPath(dataDir, conversationId)
+  if (!existsSync(path)) {
+    return undefined
+  }
+  try {
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as Partial<InflightEntry> | null
+    if (
+      raw === null ||
+      typeof raw !== 'object' ||
+      typeof raw.id !== 'string' ||
+      raw.id === '' ||
+      typeof raw.startedAt !== 'number' ||
+      !Number.isFinite(raw.startedAt)
+    ) {
+      return undefined
+    }
+    const pid = typeof raw.pid === 'number' && Number.isInteger(raw.pid) && raw.pid > 0 ? raw.pid : undefined
+    return {
+      id: raw.id,
+      startedAt: raw.startedAt,
+      ...(pid !== undefined ? { pid } : {}),
+    }
+  } catch {
+    return undefined
+  }
+}
+
+export const clearInflight = (dataDir: string, conversationId: string, expectedId?: string) => {
+  if (expectedId !== undefined) {
+    const current = readInflight(dataDir, conversationId)
+    if (current === undefined || current.id !== expectedId) {
+      return
+    }
+  }
+  const path = inflightPath(dataDir, conversationId)
   if (!existsSync(path)) {
     return
   }

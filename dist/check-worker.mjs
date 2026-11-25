@@ -662,6 +662,7 @@ var safeId = (id) => id.replace(/[^a-zA-Z0-9._-]/g, "_") || "default";
 var sessionPath = (dataDir, conversationId) => join2(dataDir, "sessions", `${safeId(conversationId)}.json`);
 var pendingPath = (dataDir, conversationId) => join2(dataDir, "pending", `${safeId(conversationId)}.json`);
 var statusLinePath = (dataDir, conversationId) => join2(dataDir, "statusline", `${safeId(conversationId)}.json`);
+var inflightPath = (dataDir, conversationId) => join2(dataDir, "inflight", `${safeId(conversationId)}.json`);
 var loadSession = (dataDir, conversationId, now = Date.now()) => {
   const path = sessionPath(dataDir, conversationId);
   if (!existsSync2(path)) {
@@ -712,10 +713,75 @@ var appendPending = (dataDir, conversationId, result) => {
   atomicWrite(path, JSON.stringify(queue));
 };
 var saveStatusLine = (dataDir, conversationId, entry) => {
+  const existing = readStatusLine(dataDir, conversationId);
+  if (existing !== undefined && existing.updatedAt > entry.updatedAt) {
+    return;
+  }
   atomicWrite(statusLinePath(dataDir, conversationId), JSON.stringify(entry));
 };
-var clearStatusLine = (dataDir, conversationId) => {
+var readStatusLine = (dataDir, conversationId) => {
   const path = statusLinePath(dataDir, conversationId);
+  if (!existsSync2(path)) {
+    return;
+  }
+  try {
+    const raw = JSON.parse(readFileSync2(path, "utf8"));
+    if (raw === null || typeof raw !== "object" || typeof raw.ansi !== "string" || typeof raw.plain !== "string") {
+      return;
+    }
+    return {
+      id: typeof raw.id === "string" ? raw.id : "",
+      ansi: raw.ansi,
+      plain: raw.plain,
+      updatedAt: typeof raw.updatedAt === "number" ? raw.updatedAt : 0
+    };
+  } catch {
+    return;
+  }
+};
+var clearStatusLine = (dataDir, conversationId, minUpdatedAt) => {
+  if (minUpdatedAt !== undefined) {
+    const existing = readStatusLine(dataDir, conversationId);
+    if (existing !== undefined && existing.updatedAt > minUpdatedAt) {
+      return;
+    }
+  }
+  const path = statusLinePath(dataDir, conversationId);
+  if (!existsSync2(path)) {
+    return;
+  }
+  try {
+    unlinkSync(path);
+  } catch {}
+};
+var readInflight = (dataDir, conversationId) => {
+  const path = inflightPath(dataDir, conversationId);
+  if (!existsSync2(path)) {
+    return;
+  }
+  try {
+    const raw = JSON.parse(readFileSync2(path, "utf8"));
+    if (raw === null || typeof raw !== "object" || typeof raw.id !== "string" || raw.id === "" || typeof raw.startedAt !== "number" || !Number.isFinite(raw.startedAt)) {
+      return;
+    }
+    const pid = typeof raw.pid === "number" && Number.isInteger(raw.pid) && raw.pid > 0 ? raw.pid : undefined;
+    return {
+      id: raw.id,
+      startedAt: raw.startedAt,
+      ...pid !== undefined ? { pid } : {}
+    };
+  } catch {
+    return;
+  }
+};
+var clearInflight = (dataDir, conversationId, expectedId) => {
+  if (expectedId !== undefined) {
+    const current = readInflight(dataDir, conversationId);
+    if (current === undefined || current.id !== expectedId) {
+      return;
+    }
+  }
+  const path = inflightPath(dataDir, conversationId);
   if (!existsSync2(path)) {
     return;
   }
@@ -784,7 +850,7 @@ var runPromptCheck = async ({
       id: String(check.id),
       ansi: ansiError(errLine),
       plain: errLine,
-      updatedAt: Date.now()
+      updatedAt: now
     });
     return { skipped: false, check, markdown: `*${errLine}*`, plain: errLine };
   };
@@ -852,7 +918,7 @@ var runPromptCheck = async ({
         updatedAt: now
       });
     } else {
-      clearStatusLine(paths.dataDir, conversationId);
+      clearStatusLine(paths.dataDir, conversationId, now);
     }
     if (settings.clean && session.streak >= STREAK_FROM) {
       const line = cleanText(session.streak);
@@ -874,27 +940,34 @@ var main = async () => {
   const paths = resolvePaths(job.cwd);
   const { settings, lists } = loadConfigAndLists(paths);
   const effectiveDisplay = job.display ?? settings.display;
-  const outcome = await runPromptCheck({
-    rawInput: job.rawInput,
-    conversationId: job.conversationId,
-    settings,
-    lists,
-    paths,
-    now: job.now ?? Date.now()
-  });
-  if (outcome.skipped || effectiveDisplay === "statusline") {
-    return;
-  }
-  if (outcome.check.status === "error" && !outcome.check.paused) {
-    return;
-  }
-  if (outcome.markdown || outcome.plain) {
-    appendPending(paths.dataDir, job.conversationId, {
-      id: String(outcome.check.id),
-      markdown: outcome.markdown,
-      plain: outcome.plain,
-      createdAt: Date.now()
+  const jobId = job.id ?? (typeof job.now === "number" ? String(job.now) : undefined);
+  try {
+    const outcome = await runPromptCheck({
+      rawInput: job.rawInput,
+      conversationId: job.conversationId,
+      settings,
+      lists,
+      paths,
+      now: job.now ?? Date.now()
     });
+    if (outcome.skipped || effectiveDisplay === "statusline") {
+      return;
+    }
+    if (outcome.check.status === "error" && !outcome.check.paused) {
+      return;
+    }
+    if (outcome.markdown || outcome.plain) {
+      appendPending(paths.dataDir, job.conversationId, {
+        id: String(outcome.check.id),
+        markdown: outcome.markdown,
+        plain: outcome.plain,
+        createdAt: Date.now()
+      });
+    }
+  } finally {
+    if (jobId !== undefined) {
+      clearInflight(paths.dataDir, job.conversationId, jobId);
+    }
   }
 };
 await main().catch(() => {

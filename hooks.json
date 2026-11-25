@@ -20,6 +20,13 @@
         "command": "node ./dist/hook.mjs",
         "timeout": 10
       }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "node ./dist/hook.mjs",
+        "timeout": 125
+      }
     ]
   }
 }
